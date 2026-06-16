@@ -77,7 +77,7 @@ static int sensor_adapter_process(
 
 /* ZMK behavior driver API */
 static const struct behavior_driver_api sensor_adapter_driver_api = {
-    .sensor_binding_adjust_speed = sensor_adapter_adjust_speed,
+    .sensor_binding_accept_data = sensor_adapter_adjust_speed,
     .sensor_binding_process = sensor_adapter_process,
 };
 
