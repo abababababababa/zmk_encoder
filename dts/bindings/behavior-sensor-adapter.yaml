@@ -1,0 +1,14 @@
+description: Sensor adapter behavior
+
+compatible: "zmk,behavior-sensor-adapter"
+
+include: base.yaml
+
+properties:
+  x-code:
+    type: int
+    required: false
+
+  y-code:
+    type: int
+    required: false
