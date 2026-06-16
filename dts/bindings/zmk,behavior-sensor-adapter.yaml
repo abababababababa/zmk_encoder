@@ -4,6 +4,8 @@ compatible: "zmk,behavior-sensor-adapter"
 
 include: base.yaml
 
+sensor-binding-cells: 2
+
 properties:
   x-code:
     type: int
