@@ -18,8 +18,6 @@ description: EC11 encoder single-shot mouse scroll behavior
 
 compatible: "zmk,behavior-ec-msc"
 
-include: behavior.yaml   # provides status, label, etc.
-
 properties:
   "#sensor-binding-cells":
     type: int
