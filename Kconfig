@@ -1,3 +1,12 @@
-config ZMK_BEHAVIOR_SENSOR_ADAPTER
-    bool "Sensor adapter behavior"
+# Copyright (c) 2024 ec_msc contributors
+# SPDX-License-Identifier: MIT
+
+config ZMK_BEHAVIOR_EC_MSC
+    bool "EC11 encoder single-shot mouse scroll behavior"
     default y
+    depends on ZMK_MOUSE
+    help
+      Enables the ec_msc behavior which sends a single HID scroll event
+      (press + immediate release) per encoder notch.  Unlike the stock
+      ZMK scroll behavior, it never leaves a "stuck" release pending if
+      a sensor event is lost mid-flight.
