@@ -125,7 +125,7 @@ static int on_sensor_binding_process(
      * enqueues the release — same pattern as sensor_rotate_common.
      */
     struct zmk_behavior_binding msc_binding = {
-        .behavior_dev = "msc",  /* matches the DTS label of &msc */
+        .behavior_dev = DEVICE_DT_NAME(DT_NODELABEL(msc)),  /* matches the DTS label of &msc */
         .param1       = param,
         .param2       = 0,
     };
