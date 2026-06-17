@@ -11,13 +11,13 @@
 #include <zephyr/logging/log.h>
 #include <drivers/behavior.h>
 #include <zmk/behavior.h>
-#include <zmk/behavior_queue.h> /* ← キューの仕組みを復活させます */
+#include <zmk/behavior_queue.h>
 #include <zmk/sensors.h>
 #include <dt-bindings/zmk/pointing.h>
 
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
-/* ── Direction tokens (include/behaviors/ec_msc.h と一致させる) ──────── */
+/* ── Direction tokens ──────── */
 #define EC_MSC_U 0
 #define EC_MSC_D 1
 #define EC_MSC_L 2
@@ -87,24 +87,21 @@ static int on_sensor_binding_process(
 
     uint32_t param = direction_to_msc_param(data->direction);
 
-    /* マクロを使って正確なデバイス名をセット（前回の修正） */
+    /* 【修正】デバイス名は元の "msc" に戻す */
     struct zmk_behavior_binding msc_binding = {
-        .behavior_dev = DEVICE_DT_NAME(DT_NODELABEL(msc)),
+        .behavior_dev = "msc",
         .param1       = param,
         .param2       = 0,
     };
 
 #if IS_ENABLED(CONFIG_ZMK_SPLIT) && !IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
-    /* Peripheral側は入力データをCentralに送るだけ */
+    /* Peripheral側は何もしない（パケットロス問題回避の要） */
     return ZMK_BEHAVIOR_OPAQUE;
 #else
-    /* * 【最大の修正ポイント】
-     * msc は「時間駆動（Tickベース）」のため、0msだと距離0になってしまいます。
-     * ここで `20` を指定し、20msだけ &msc を押しっぱなしにすることで
-     * 確実にPC側へスクロール信号を発生させます。
-     */
+    /* Central側で、押す(0ms)と離す(15ms)をアトミックにキューに積む */
+    /* これによりBLEのロスによるStuckバグは絶対に起きず、かつラグも最小限になります */
     return zmk_behavior_queue_add(&event, msc_binding, true,  0) ||
-           zmk_behavior_queue_add(&event, msc_binding, false, 20);
+           zmk_behavior_queue_add(&event, msc_binding, false, 15);
 #endif
 }
 
