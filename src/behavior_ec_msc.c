@@ -3,64 +3,24 @@
  * SPDX-License-Identifier: MIT
  *
  * behavior_ec_msc.c
- *
-<<<<<<< HEAD
- * EC11 encoder scroll behavior for ZMK main (Zephyr 4.1).
-=======
- * EC11 encoder scroll behavior for ZMK main (Zephyr 4.1).
- *
- * Instead of calling input_report_rel() directly (which requires a valid
- * virtual device pointer that is internal to ZMK's pointing subsystem),
- * this behavior invokes the built-in &msc behavior via zmk_behavior_queue_add,
- * exactly like behavior_sensor_rotate_common does for &kp.
- *
- * This means:
- *   - Press and Release are both queued atomically — no "stuck" scroll state.
- *   - All of ZMK's HID plumbing (BLE, USB, split) is handled correctly.
- *   - No dependency on internal pointing device pointers.
- *
- * Keymap usage:
- *   sensor-bindings = <&ec_msc U D>;   // CW=Up,    CCW=Down
- *   sensor-bindings = <&ec_msc R L>;   // CW=Right, CCW=Left
- *
- * Direction tokens defined in include/behaviors/ec_msc.h:
- *   U=0, D=1, L=2, R=3
->>>>>>> 2d20d25b3cc72b12819e3f12efda2d5def8ebeae
  */
 
 #define DT_DRV_COMPAT zmk_behavior_ec_msc
 
 #include <zephyr/device.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/input/input.h> /* ← 追加: Zephyrの標準入力サブシステム */
 #include <drivers/behavior.h>
 #include <zmk/behavior.h>
-#include <zmk/behavior_queue.h>
 #include <zmk/sensors.h>
-#include <dt-bindings/zmk/pointing.h>
 
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
-/* ── Direction tokens (must match include/behaviors/ec_msc.h) ──────── */
+/* ── Direction tokens (include/behaviors/ec_msc.h と一致させる) ──────── */
 #define EC_MSC_U 0
 #define EC_MSC_D 1
 #define EC_MSC_L 2
 #define EC_MSC_R 3
-
-/*
- * Map direction token to the &msc parameter value.
- * SCRL_UP / SCRL_DOWN / SCRL_LEFT / SCRL_RIGHT are defined in
- * dt-bindings/zmk/pointing.h and encode the velocity as a uint32.
- */
-static uint32_t direction_to_msc_param(uint8_t direction)
-{
-    switch (direction) {
-    case EC_MSC_U: return SCRL_UP;
-    case EC_MSC_D: return SCRL_DOWN;
-    case EC_MSC_L: return SCRL_LEFT;
-    case EC_MSC_R: return SCRL_RIGHT;
-    default:       return SCRL_DOWN; /* fallback */
-    }
-}
 
 /* ── Per-instance data ───────────────────────────────────────────────── */
 struct behavior_ec_msc_data {
@@ -71,7 +31,7 @@ struct behavior_ec_msc_data {
 struct behavior_ec_msc_config {
 };
 
-/* ── Phase 1: accept_data — decode direction from sensor channel ──────── */
+/* ── Phase 1: accept_data — センサーの回転方向を受け取る ──────── */
 static int on_sensor_binding_accept_data(
     struct zmk_behavior_binding *binding,
     struct zmk_behavior_binding_event event,
@@ -93,13 +53,14 @@ static int on_sensor_binding_accept_data(
         return 0;
     }
 
+    /* 回転方向（正か負か）によって、DTSで指定されたパラメーターを選択 */
     data->direction = (inc > 0) ? (uint8_t)binding->param1
                                 : (uint8_t)binding->param2;
     data->pending   = true;
     return 0;
 }
 
-/* ── Phase 2: process — queue msc press+release via behavior_queue ────── */
+/* ── Phase 2: process — スクロールイベントを直接発火する ────── */
 static int on_sensor_binding_process(
     struct zmk_behavior_binding *binding,
     struct zmk_behavior_binding_event event,
@@ -117,30 +78,38 @@ static int on_sensor_binding_process(
         return ZMK_BEHAVIOR_OPAQUE;
     }
 
-    uint32_t param = direction_to_msc_param(data->direction);
-
-    /*
-     * Build an &msc binding and queue press + immediate release.
-     * zmk_behavior_queue_add() enqueues the press, then after wait_ms=0
-     * enqueues the release — same pattern as sensor_rotate_common.
-     */
-    struct zmk_behavior_binding msc_binding = {
-        .behavior_dev = DEVICE_DT_NAME(DT_NODELABEL(msc)),  /* matches the DTS label of &msc */
-        .param1       = param,
-        .param2       = 0,
-    };
-
-/* ↓↓↓ ここから修正箇所 ↓↓↓ */
 #if IS_ENABLED(CONFIG_ZMK_SPLIT) && !IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
-    /* Peripheral側は入力データをCentralに送るだけで、Behavior自体は実行しない */
+    /* Peripheral側は入力データをCentralに送るだけで自身では処理しない */
     return ZMK_BEHAVIOR_OPAQUE;
 #else
-    /* Central側、または単体キーボードの場合はキューに積む */
-    /* press, 0 ms hold, then release */
-    return zmk_behavior_queue_add(&event, msc_binding, true,  0) ||
-           zmk_behavior_queue_add(&event, msc_binding, false, 0);
+    /* Central側、または単体キーボードの場合：1ノッチ分のスクロールを直接発火 */
+    int32_t val = 1;
+    uint16_t code = INPUT_REL_WHEEL; /* デフォルトは縦ホイール */
+
+    switch (data->direction) {
+        case EC_MSC_U:
+            code = INPUT_REL_WHEEL;
+            val = 1;   /* 上 */
+            break;
+        case EC_MSC_D:
+            code = INPUT_REL_WHEEL;
+            val = -1;  /* 下 */
+            break;
+        case EC_MSC_R:
+            code = INPUT_REL_HWHEEL;
+            val = 1;   /* 右 */
+            break;
+        case EC_MSC_L:
+            code = INPUT_REL_HWHEEL;
+            val = -1;  /* 左 */
+            break;
+    }
+
+    /* Zephyrのinputサブシステムに直接イベントを投げ込む */
+    input_report_rel(dev, code, val, true, K_NO_WAIT);
+
+    return ZMK_BEHAVIOR_OPAQUE;
 #endif
-/* ↑↑↑ ここまで修正箇所 ↑↑↑ */
 }
 
 /* ── Behavior driver API ─────────────────────────────────────────────── */
