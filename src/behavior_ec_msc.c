@@ -3,6 +3,19 @@
  * SPDX-License-Identifier: MIT
  *
  * behavior_ec_msc.c
+ *
+ * EC11 encoder scroll behavior for ZMK main (Zephyr 4.1).
+ *
+ * On Central (CONFIG_ZMK_KEYMAP=y):
+ *   accept_data resolves direction → process queues &msc press+release.
+ *
+ * On Peripheral (CONFIG_ZMK_KEYMAP=n):
+ *   accept_data stores direction (for split forwarding by ZMK core),
+ *   process is a no-op — zmk_behavior_queue_add is not linked on peripheral.
+ *
+ * Keymap usage:
+ *   sensor-bindings = <&ec_msc U D>;   // CW=Up,    CCW=Down
+ *   sensor-bindings = <&ec_msc R L>;   // CW=Right, CCW=Left
  */
 
 #define DT_DRV_COMPAT zmk_behavior_ec_msc
@@ -11,36 +24,31 @@
 #include <zephyr/logging/log.h>
 #include <drivers/behavior.h>
 #include <zmk/behavior.h>
-#include <zmk/behavior_queue.h>
 #include <zmk/sensors.h>
+
+#if IS_ENABLED(CONFIG_ZMK_KEYMAP)
+#include <zmk/behavior_queue.h>
 #include <dt-bindings/zmk/pointing.h>
+#endif
 
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
-/* ── Direction tokens ──────── */
+/* ── Direction tokens (must match include/behaviors/ec_msc.h) ──────── */
 #define EC_MSC_U 0
 #define EC_MSC_D 1
 #define EC_MSC_L 2
 #define EC_MSC_R 3
 
-static uint32_t direction_to_msc_param(uint8_t direction)
-{
-    switch (direction) {
-    case EC_MSC_U: return SCRL_UP;
-    case EC_MSC_D: return SCRL_DOWN;
-    case EC_MSC_L: return SCRL_LEFT;
-    case EC_MSC_R: return SCRL_RIGHT;
-    default:       return SCRL_DOWN;
-    }
-}
-
+/* ── Per-instance data ───────────────────────────────────────────────── */
 struct behavior_ec_msc_data {
     uint8_t direction;
     bool    pending;
 };
 
-struct behavior_ec_msc_config {};
+struct behavior_ec_msc_config {
+};
 
+/* ── Phase 1: accept_data — decode direction from sensor channel ──────── */
 static int on_sensor_binding_accept_data(
     struct zmk_behavior_binding *binding,
     struct zmk_behavior_binding_event event,
@@ -68,11 +76,13 @@ static int on_sensor_binding_accept_data(
     return 0;
 }
 
+/* ── Phase 2: process — queue &msc on Central, no-op on Peripheral ────── */
 static int on_sensor_binding_process(
     struct zmk_behavior_binding *binding,
     struct zmk_behavior_binding_event event,
     enum behavior_sensor_binding_process_mode mode)
 {
+#if IS_ENABLED(CONFIG_ZMK_KEYMAP)
     const struct device *dev = zmk_behavior_get_binding(binding->behavior_dev);
     struct behavior_ec_msc_data *data = dev->data;
 
@@ -85,31 +95,35 @@ static int on_sensor_binding_process(
         return ZMK_BEHAVIOR_OPAQUE;
     }
 
-    uint32_t param = direction_to_msc_param(data->direction);
+    uint32_t param;
+    switch (data->direction) {
+    case EC_MSC_U: param = SCRL_UP;    break;
+    case EC_MSC_D: param = SCRL_DOWN;  break;
+    case EC_MSC_L: param = SCRL_LEFT;  break;
+    case EC_MSC_R: param = SCRL_RIGHT; break;
+    default:       param = SCRL_DOWN;  break;
+    }
 
-    /* 【修正】デバイス名は元の "msc" に戻す */
     struct zmk_behavior_binding msc_binding = {
         .behavior_dev = "msc",
         .param1       = param,
         .param2       = 0,
     };
 
-#if IS_ENABLED(CONFIG_ZMK_SPLIT) && !IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
-    /* Peripheral側は何もしない（パケットロス問題回避の要） */
+    zmk_behavior_queue_add(&event, msc_binding, true,  0);
+    zmk_behavior_queue_add(&event, msc_binding, false, 0);
+#endif /* IS_ENABLED(CONFIG_ZMK_KEYMAP) */
+
     return ZMK_BEHAVIOR_OPAQUE;
-#else
-    /* Central側で、押す(0ms)と離す(15ms)をアトミックにキューに積む */
-    /* これによりBLEのロスによるStuckバグは絶対に起きず、かつラグも最小限になります */
-    return zmk_behavior_queue_add(&event, msc_binding, true,  0) ||
-           zmk_behavior_queue_add(&event, msc_binding, false, 15);
-#endif
 }
 
+/* ── Behavior driver API ─────────────────────────────────────────────── */
 static const struct behavior_driver_api behavior_ec_msc_driver_api = {
     .sensor_binding_accept_data = on_sensor_binding_accept_data,
     .sensor_binding_process     = on_sensor_binding_process,
 };
 
+/* ── Instantiation macro ─────────────────────────────────────────────── */
 #define EC_MSC_INST(n)                                                           \
     static struct behavior_ec_msc_data behavior_ec_msc_data_##n = {};           \
     static const struct behavior_ec_msc_config behavior_ec_msc_config_##n = {}; \
