@@ -4,12 +4,14 @@
  *
  * behavior_ec_msc.c
  *
- * EC11 encoder scroll behavior for ZMK (main / v0.4+ / Zephyr 4.x).
+ * EC11 encoder scroll behavior for ZMK main (Zephyr 4.1 / ZMK post-PR#2477).
  *
- * Sends a single HID scroll event per encoder notch using Zephyr's
- * input subsystem (input_report_rel + input_report_sync).
- * Press and release are completed in the same call stack, so a lost
- * sensor event can never leave a "stuck" scroll state.
+ * Uses the two-phase sensor API introduced alongside the input subsystem:
+ *   sensor_binding_accept_data  — receives raw sensor_value, stores direction
+ *   sensor_binding_process      — fires input_report_rel and returns
+ *
+ * Because press+release happen in one call stack, a lost sensor event can
+ * never leave a "stuck" scroll state.
  *
  * Keymap usage:
  *   sensor-bindings = <&ec_msc U D>;   // CW=Up,    CCW=Down
@@ -23,6 +25,7 @@
 #include <zephyr/logging/log.h>
 #include <drivers/behavior.h>
 #include <zmk/behavior.h>
+#include <zmk/sensors.h>
 
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
@@ -32,48 +35,33 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #define EC_MSC_L 2
 #define EC_MSC_R 3
 
-/* ── Per-instance config (nothing needed; all state is in params) ───── */
-struct behavior_ec_msc_config {
+/* ── Per-instance data: stores direction resolved in accept_data ────── */
+struct behavior_ec_msc_data {
+    uint8_t direction; /* EC_MSC_U/D/L/R resolved from last accept_data */
+    bool    pending;   /* true when a scroll tick should be sent */
 };
 
-/* ── send_scroll: fire one tick and sync immediately ────────────────── */
+struct behavior_ec_msc_config {
+    /* nothing; params come from the binding at runtime */
+};
+
+/* ── send one scroll tick via Zephyr input subsystem ─────────────────── */
 static int send_scroll(uint8_t direction)
 {
-    /*
-     * ZMK main uses Zephyr's input subsystem for pointing devices.
-     * input_report_rel() queues a REL event; input_report_sync()
-     * flushes it.  Two syncs (non-zero then zero) give the host a
-     * clean press-then-release within a single function call.
-     *
-     * INPUT_REL_WHEEL  = vertical   scroll  (positive = up)
-     * INPUT_REL_HWHEEL = horizontal scroll  (positive = right)
-     */
     uint16_t code;
     int32_t  value;
 
     switch (direction) {
-    case EC_MSC_U:
-        code  = INPUT_REL_WHEEL;
-        value = 1;
-        break;
-    case EC_MSC_D:
-        code  = INPUT_REL_WHEEL;
-        value = -1;
-        break;
-    case EC_MSC_R:
-        code  = INPUT_REL_HWHEEL;
-        value = 1;
-        break;
-    case EC_MSC_L:
-        code  = INPUT_REL_HWHEEL;
-        value = -1;
-        break;
+    case EC_MSC_U: code = INPUT_REL_WHEEL;  value =  1; break;
+    case EC_MSC_D: code = INPUT_REL_WHEEL;  value = -1; break;
+    case EC_MSC_R: code = INPUT_REL_HWHEEL; value =  1; break;
+    case EC_MSC_L: code = INPUT_REL_HWHEEL; value = -1; break;
     default:
         LOG_WRN("ec_msc: unknown direction %d", direction);
         return -EINVAL;
     }
 
-    /* Send the scroll value and sync (= "press") */
+    /* sync=true flushes the event immediately — no separate sync call needed */
     int err = input_report_rel(NULL, code, value, true, K_NO_WAIT);
     if (err) {
         LOG_ERR("ec_msc: input_report_rel failed (%d)", err);
@@ -81,40 +69,74 @@ static int send_scroll(uint8_t direction)
     return err;
 }
 
-/* ── Sensor binding handler ─────────────────────────────────────────── */
-static int on_sensor_binding_triggered(struct zmk_behavior_binding *binding,
-                                       const struct zmk_behavior_sensor_val *val,
-                                       enum sensor_channel channel)
+/* ── Phase 1: receive sensor data, resolve direction ─────────────────── */
+static int on_sensor_binding_accept_data(
+    struct zmk_behavior_binding *binding,
+    struct zmk_behavior_binding_event event,
+    const struct zmk_sensor_config *sensor_config,
+    size_t channel_data_size,
+    const struct zmk_sensor_channel_data channel_data[channel_data_size])
 {
-    /*
-     * param1 = direction for CW  (positive increment)
-     * param2 = direction for CCW (negative increment)
-     */
-    if (val->value == 0) {
+    const struct device *dev = zmk_behavior_get_binding(binding->behavior_dev);
+    struct behavior_ec_msc_data *data = dev->data;
+
+    if (channel_data_size == 0) {
+        data->pending = false;
+        return 0;
+    }
+
+    /* val1 carries the rotation increment (positive = CW, negative = CCW) */
+    int32_t inc = channel_data[0].value.val1;
+
+    if (inc == 0) {
+        data->pending = false;
+        return 0;
+    }
+
+    data->direction = (inc > 0) ? (uint8_t)binding->param1
+                                : (uint8_t)binding->param2;
+    data->pending   = true;
+    return 0;
+}
+
+/* ── Phase 2: fire the scroll event (or discard) ─────────────────────── */
+static int on_sensor_binding_process(
+    struct zmk_behavior_binding *binding,
+    struct zmk_behavior_binding_event event,
+    enum behavior_sensor_binding_process_mode mode)
+{
+    const struct device *dev = zmk_behavior_get_binding(binding->behavior_dev);
+    struct behavior_ec_msc_data *data = dev->data;
+
+    if (!data->pending) {
         return ZMK_BEHAVIOR_OPAQUE;
     }
 
-    uint8_t direction = (val->value > 0)
-                        ? (uint8_t)binding->param1
-                        : (uint8_t)binding->param2;
+    data->pending = false;
 
-    int err = send_scroll(direction);
+    if (mode == BEHAVIOR_SENSOR_BINDING_PROCESS_MODE_DISCARD) {
+        return ZMK_BEHAVIOR_OPAQUE;
+    }
+
+    int err = send_scroll(data->direction);
     return (err < 0) ? err : ZMK_BEHAVIOR_OPAQUE;
 }
 
-/* ── Behavior driver API ─────────────────────────────────────────────── */
+/* ── Behavior driver API vtable ──────────────────────────────────────── */
 static const struct behavior_driver_api behavior_ec_msc_driver_api = {
-    .sensor_binding_triggered = on_sensor_binding_triggered,
+    .sensor_binding_accept_data = on_sensor_binding_accept_data,
+    .sensor_binding_process     = on_sensor_binding_process,
 };
 
 /* ── Instantiation macro ─────────────────────────────────────────────── */
 #define EC_MSC_INST(n)                                                           \
+    static struct behavior_ec_msc_data behavior_ec_msc_data_##n = {};           \
     static const struct behavior_ec_msc_config behavior_ec_msc_config_##n = {}; \
     BEHAVIOR_DT_INST_DEFINE(n,                                                   \
                             NULL,                                                \
                             NULL,                                                \
-                            NULL,                                                \
-                            &behavior_ec_msc_config_##n,                         \
+                            &behavior_ec_msc_data_##n,                          \
+                            &behavior_ec_msc_config_##n,                        \
                             POST_KERNEL,                                         \
                             CONFIG_KERNEL_INIT_PRIORITY_DEFAULT,                 \
                             &behavior_ec_msc_driver_api);
