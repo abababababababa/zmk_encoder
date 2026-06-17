@@ -4,28 +4,35 @@
  *
  * behavior_ec_msc.c
  *
- * EC11 encoder scroll behavior for ZMK main (Zephyr 4.1 / ZMK post-PR#2477).
+ * EC11 encoder scroll behavior for ZMK main (Zephyr 4.1).
  *
- * Uses the two-phase sensor API introduced alongside the input subsystem:
- *   sensor_binding_accept_data  — receives raw sensor_value, stores direction
- *   sensor_binding_process      — fires input_report_rel and returns
+ * Instead of calling input_report_rel() directly (which requires a valid
+ * virtual device pointer that is internal to ZMK's pointing subsystem),
+ * this behavior invokes the built-in &msc behavior via zmk_behavior_queue_add,
+ * exactly like behavior_sensor_rotate_common does for &kp.
  *
- * Because press+release happen in one call stack, a lost sensor event can
- * never leave a "stuck" scroll state.
+ * This means:
+ *   - Press and Release are both queued atomically — no "stuck" scroll state.
+ *   - All of ZMK's HID plumbing (BLE, USB, split) is handled correctly.
+ *   - No dependency on internal pointing device pointers.
  *
  * Keymap usage:
  *   sensor-bindings = <&ec_msc U D>;   // CW=Up,    CCW=Down
  *   sensor-bindings = <&ec_msc R L>;   // CW=Right, CCW=Left
+ *
+ * Direction tokens defined in include/behaviors/ec_msc.h:
+ *   U=0, D=1, L=2, R=3
  */
 
 #define DT_DRV_COMPAT zmk_behavior_ec_msc
 
 #include <zephyr/device.h>
-#include <zephyr/input/input.h>
 #include <zephyr/logging/log.h>
 #include <drivers/behavior.h>
 #include <zmk/behavior.h>
+#include <zmk/behavior_queue.h>
 #include <zmk/sensors.h>
+#include <dt-bindings/zmk/pointing.h>
 
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
@@ -35,41 +42,32 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #define EC_MSC_L 2
 #define EC_MSC_R 3
 
-/* ── Per-instance data: stores direction resolved in accept_data ────── */
+/*
+ * Map direction token to the &msc parameter value.
+ * SCRL_UP / SCRL_DOWN / SCRL_LEFT / SCRL_RIGHT are defined in
+ * dt-bindings/zmk/pointing.h and encode the velocity as a uint32.
+ */
+static uint32_t direction_to_msc_param(uint8_t direction)
+{
+    switch (direction) {
+    case EC_MSC_U: return SCRL_UP;
+    case EC_MSC_D: return SCRL_DOWN;
+    case EC_MSC_L: return SCRL_LEFT;
+    case EC_MSC_R: return SCRL_RIGHT;
+    default:       return SCRL_DOWN; /* fallback */
+    }
+}
+
+/* ── Per-instance data ───────────────────────────────────────────────── */
 struct behavior_ec_msc_data {
-    uint8_t direction; /* EC_MSC_U/D/L/R resolved from last accept_data */
-    bool    pending;   /* true when a scroll tick should be sent */
+    uint8_t direction;
+    bool    pending;
 };
 
 struct behavior_ec_msc_config {
-    /* nothing; params come from the binding at runtime */
 };
 
-/* ── send one scroll tick via Zephyr input subsystem ─────────────────── */
-static int send_scroll(uint8_t direction)
-{
-    uint16_t code;
-    int32_t  value;
-
-    switch (direction) {
-    case EC_MSC_U: code = INPUT_REL_WHEEL;  value =  1; break;
-    case EC_MSC_D: code = INPUT_REL_WHEEL;  value = -1; break;
-    case EC_MSC_R: code = INPUT_REL_HWHEEL; value =  1; break;
-    case EC_MSC_L: code = INPUT_REL_HWHEEL; value = -1; break;
-    default:
-        LOG_WRN("ec_msc: unknown direction %d", direction);
-        return -EINVAL;
-    }
-
-    /* sync=true flushes the event immediately — no separate sync call needed */
-    int err = input_report_rel(NULL, code, value, true, K_NO_WAIT);
-    if (err) {
-        LOG_ERR("ec_msc: input_report_rel failed (%d)", err);
-    }
-    return err;
-}
-
-/* ── Phase 1: receive sensor data, resolve direction ─────────────────── */
+/* ── Phase 1: accept_data — decode direction from sensor channel ──────── */
 static int on_sensor_binding_accept_data(
     struct zmk_behavior_binding *binding,
     struct zmk_behavior_binding_event event,
@@ -85,9 +83,7 @@ static int on_sensor_binding_accept_data(
         return 0;
     }
 
-    /* val1 carries the rotation increment (positive = CW, negative = CCW) */
     int32_t inc = channel_data[0].value.val1;
-
     if (inc == 0) {
         data->pending = false;
         return 0;
@@ -99,7 +95,7 @@ static int on_sensor_binding_accept_data(
     return 0;
 }
 
-/* ── Phase 2: fire the scroll event (or discard) ─────────────────────── */
+/* ── Phase 2: process — queue msc press+release via behavior_queue ────── */
 static int on_sensor_binding_process(
     struct zmk_behavior_binding *binding,
     struct zmk_behavior_binding_event event,
@@ -111,18 +107,31 @@ static int on_sensor_binding_process(
     if (!data->pending) {
         return ZMK_BEHAVIOR_OPAQUE;
     }
-
     data->pending = false;
 
     if (mode == BEHAVIOR_SENSOR_BINDING_PROCESS_MODE_DISCARD) {
         return ZMK_BEHAVIOR_OPAQUE;
     }
 
-    int err = send_scroll(data->direction);
-    return (err < 0) ? err : ZMK_BEHAVIOR_OPAQUE;
+    uint32_t param = direction_to_msc_param(data->direction);
+
+    /*
+     * Build an &msc binding and queue press + immediate release.
+     * zmk_behavior_queue_add() enqueues the press, then after wait_ms=0
+     * enqueues the release — same pattern as sensor_rotate_common.
+     */
+    struct zmk_behavior_binding msc_binding = {
+        .behavior_dev = "msc",  /* matches the DTS label of &msc */
+        .param1       = param,
+        .param2       = 0,
+    };
+
+    /* press, 0 ms hold, then release */
+    return zmk_behavior_queue_add(&event, msc_binding, true,  0) ||
+           zmk_behavior_queue_add(&event, msc_binding, false, 0);
 }
 
-/* ── Behavior driver API vtable ──────────────────────────────────────── */
+/* ── Behavior driver API ─────────────────────────────────────────────── */
 static const struct behavior_driver_api behavior_ec_msc_driver_api = {
     .sensor_binding_accept_data = on_sensor_binding_accept_data,
     .sensor_binding_process     = on_sensor_binding_process,
