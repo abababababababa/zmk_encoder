@@ -2,9 +2,14 @@
  * Copyright (c) 2024 ec_msc contributors
  * SPDX-License-Identifier: MIT
  *
- * behavior_ec_msc.c
+ * behavior_ec_msc.c — EC11 encoder scroll behavior for ZMK main (Zephyr 4.1)
  *
- * EC11 encoder scroll behavior for ZMK main (Zephyr 4.1).
+ * Central (CONFIG_ZMK_POINTING=y && SPLIT_ROLE_CENTRAL, or non-split):
+ *   accept_data resolves direction → process queues &msc press+release.
+ *
+ * Peripheral (CONFIG_ZMK_POINTING=n):
+ *   accept_data runs; process is a no-op.
+ *   DEVICE_DT_GET(&msc) is never referenced so no linker error.
  *
  * Keymap usage:
  *   ec_msc: ec_msc {
@@ -23,10 +28,12 @@
 #include <zmk/behavior.h>
 #include <zmk/sensors.h>
 
-#if IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL) || !IS_ENABLED(CONFIG_ZMK_SPLIT)
+/* Only pull in behavior_queue + pointing defines on Central */
+#if IS_ENABLED(CONFIG_ZMK_POINTING) && \
+    (IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL) || !IS_ENABLED(CONFIG_ZMK_SPLIT))
 #include <zmk/behavior_queue.h>
 #include <dt-bindings/zmk/pointing.h>
-#define HAS_BEHAVIOR_QUEUE 1
+#define EC_MSC_HAS_QUEUE 1
 #endif
 
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
@@ -42,7 +49,9 @@ struct behavior_ec_msc_data {
 };
 
 struct behavior_ec_msc_config {
-    const struct device *msc_dev; /* pointer to &msc device */
+#if defined(EC_MSC_HAS_QUEUE)
+    const struct device *msc_dev;
+#endif
 };
 
 static int on_sensor_binding_accept_data(
@@ -61,7 +70,7 @@ static int on_sensor_binding_accept_data(
     }
 
     int32_t inc = channel_data[0].value.val1;
-    LOG_DBG("ec_msc accept_data: inc=%d param1=%d param2=%d",
+    LOG_DBG("ec_msc accept: inc=%d param1=%d param2=%d",
             inc, (int)binding->param1, (int)binding->param2);
 
     if (inc == 0) {
@@ -80,7 +89,7 @@ static int on_sensor_binding_process(
     struct zmk_behavior_binding_event event,
     enum behavior_sensor_binding_process_mode mode)
 {
-#if defined(HAS_BEHAVIOR_QUEUE)
+#if defined(EC_MSC_HAS_QUEUE)
     const struct device *dev = zmk_behavior_get_binding(binding->behavior_dev);
     struct behavior_ec_msc_data *data = dev->data;
     const struct behavior_ec_msc_config *cfg = dev->config;
@@ -105,9 +114,8 @@ static int on_sensor_binding_process(
     default:       param = SCRL_DOWN;  break;
     }
 
-    LOG_DBG("ec_msc queuing via msc_dev=%p param=0x%08x", cfg->msc_dev, param);
+    LOG_DBG("ec_msc queuing via %s param=0x%08x", cfg->msc_dev->name, param);
 
-    /* Use the device pointer resolved at init time — no string lookup */
     struct zmk_behavior_binding msc_binding = {
         .behavior_dev = cfg->msc_dev->name,
         .param1       = param,
@@ -126,19 +134,30 @@ static const struct behavior_driver_api behavior_ec_msc_driver_api = {
     .sensor_binding_process     = on_sensor_binding_process,
 };
 
-/* Instantiation — reads msc-behavior phandle from DTS */
+/* Central: resolve &msc device pointer from DTS phandle */
+#if defined(EC_MSC_HAS_QUEUE)
 #define EC_MSC_INST(n)                                                              \
     static struct behavior_ec_msc_data behavior_ec_msc_data_##n = {};              \
     static const struct behavior_ec_msc_config behavior_ec_msc_config_##n = {      \
         .msc_dev = DEVICE_DT_GET(DT_INST_PHANDLE(n, msc_behavior)),                \
     };                                                                              \
-    BEHAVIOR_DT_INST_DEFINE(n,                                                      \
-                            NULL,                                                   \
-                            NULL,                                                   \
+    BEHAVIOR_DT_INST_DEFINE(n, NULL, NULL,                                         \
                             &behavior_ec_msc_data_##n,                             \
                             &behavior_ec_msc_config_##n,                            \
                             POST_KERNEL,                                            \
                             CONFIG_KERNEL_INIT_PRIORITY_DEFAULT,                    \
                             &behavior_ec_msc_driver_api);
+#else
+/* Peripheral: no msc_dev */
+#define EC_MSC_INST(n)                                                              \
+    static struct behavior_ec_msc_data behavior_ec_msc_data_##n = {};              \
+    static const struct behavior_ec_msc_config behavior_ec_msc_config_##n = {};    \
+    BEHAVIOR_DT_INST_DEFINE(n, NULL, NULL,                                         \
+                            &behavior_ec_msc_data_##n,                             \
+                            &behavior_ec_msc_config_##n,                            \
+                            POST_KERNEL,                                            \
+                            CONFIG_KERNEL_INIT_PRIORITY_DEFAULT,                    \
+                            &behavior_ec_msc_driver_api);
+#endif
 
 DT_INST_FOREACH_STATUS_OKAY(EC_MSC_INST)
