@@ -4,6 +4,9 @@
  *
  * behavior_ec_msc.c
  *
+<<<<<<< HEAD
+ * EC11 encoder scroll behavior for ZMK main (Zephyr 4.1).
+=======
  * EC11 encoder scroll behavior for ZMK main (Zephyr 4.1).
  *
  * Instead of calling input_report_rel() directly (which requires a valid
@@ -22,6 +25,7 @@
  *
  * Direction tokens defined in include/behaviors/ec_msc.h:
  *   U=0, D=1, L=2, R=3
+>>>>>>> 2d20d25b3cc72b12819e3f12efda2d5def8ebeae
  */
 
 #define DT_DRV_COMPAT zmk_behavior_ec_msc
@@ -126,9 +130,17 @@ static int on_sensor_binding_process(
         .param2       = 0,
     };
 
+/* ↓↓↓ ここから修正箇所 ↓↓↓ */
+#if IS_ENABLED(CONFIG_ZMK_SPLIT) && !IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
+    /* Peripheral側は入力データをCentralに送るだけで、Behavior自体は実行しない */
+    return ZMK_BEHAVIOR_OPAQUE;
+#else
+    /* Central側、または単体キーボードの場合はキューに積む */
     /* press, 0 ms hold, then release */
     return zmk_behavior_queue_add(&event, msc_binding, true,  0) ||
            zmk_behavior_queue_add(&event, msc_binding, false, 0);
+#endif
+/* ↑↑↑ ここまで修正箇所 ↑↑↑ */
 }
 
 /* ── Behavior driver API ─────────────────────────────────────────────── */
