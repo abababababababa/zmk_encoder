@@ -1,18 +1,5 @@
 # Copyright (c) 2024 ec_msc contributors
 # SPDX-License-Identifier: MIT
-#
-# dts/bindings/zmk,behavior-ec-msc.yaml
-#
-# Devicetree binding for the EC11 encoder mouse-scroll behavior.
-#
-# Usage in keymap:
-#   ec_msc: ec_msc {
-#       compatible = "zmk,behavior-ec-msc";
-#       #sensor-binding-cells = <2>;
-#   };
-#
-#   sensor-bindings = <&ec_msc U D>;   /* CW=Up, CCW=Down */
-#   sensor-bindings = <&ec_msc L R>;   /* CW=Left, CCW=Right */
 
 description: EC11 encoder single-shot mouse scroll behavior
 
@@ -23,9 +10,13 @@ properties:
     type: int
     required: true
     const: 2
+  msc-behavior:
+    type: phandle
+    required: true
     description: >
-      Two cells: param1 = CW direction token, param2 = CCW direction token.
+      Phandle to the &msc behavior node (zmk,behavior-input-two-axis).
+      This resolves the correct device pointer at compile time.
 
 sensor-binding-cells:
-  - param1   # direction when encoder turns CW  (e.g. U or R)
-  - param2   # direction when encoder turns CCW (e.g. D or L)
+  - param1
+  - param2
