@@ -9,10 +9,11 @@
 
 #include <zephyr/device.h>
 #include <zephyr/logging/log.h>
-#include <zephyr/input/input.h> /* ← 追加: Zephyrの標準入力サブシステム */
 #include <drivers/behavior.h>
 #include <zmk/behavior.h>
+#include <zmk/behavior_queue.h> /* ← キューの仕組みを復活させます */
 #include <zmk/sensors.h>
+#include <dt-bindings/zmk/pointing.h>
 
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
@@ -22,16 +23,24 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #define EC_MSC_L 2
 #define EC_MSC_R 3
 
-/* ── Per-instance data ───────────────────────────────────────────────── */
+static uint32_t direction_to_msc_param(uint8_t direction)
+{
+    switch (direction) {
+    case EC_MSC_U: return SCRL_UP;
+    case EC_MSC_D: return SCRL_DOWN;
+    case EC_MSC_L: return SCRL_LEFT;
+    case EC_MSC_R: return SCRL_RIGHT;
+    default:       return SCRL_DOWN;
+    }
+}
+
 struct behavior_ec_msc_data {
     uint8_t direction;
     bool    pending;
 };
 
-struct behavior_ec_msc_config {
-};
+struct behavior_ec_msc_config {};
 
-/* ── Phase 1: accept_data — センサーの回転方向を受け取る ──────── */
 static int on_sensor_binding_accept_data(
     struct zmk_behavior_binding *binding,
     struct zmk_behavior_binding_event event,
@@ -53,14 +62,12 @@ static int on_sensor_binding_accept_data(
         return 0;
     }
 
-    /* 回転方向（正か負か）によって、DTSで指定されたパラメーターを選択 */
     data->direction = (inc > 0) ? (uint8_t)binding->param1
                                 : (uint8_t)binding->param2;
     data->pending   = true;
     return 0;
 }
 
-/* ── Phase 2: process — スクロールイベントを直接発火する ────── */
 static int on_sensor_binding_process(
     struct zmk_behavior_binding *binding,
     struct zmk_behavior_binding_event event,
@@ -78,47 +85,34 @@ static int on_sensor_binding_process(
         return ZMK_BEHAVIOR_OPAQUE;
     }
 
+    uint32_t param = direction_to_msc_param(data->direction);
+
+    /* マクロを使って正確なデバイス名をセット（前回の修正） */
+    struct zmk_behavior_binding msc_binding = {
+        .behavior_dev = DEVICE_DT_NAME(DT_NODELABEL(msc)),
+        .param1       = param,
+        .param2       = 0,
+    };
+
 #if IS_ENABLED(CONFIG_ZMK_SPLIT) && !IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
-    /* Peripheral側は入力データをCentralに送るだけで自身では処理しない */
+    /* Peripheral側は入力データをCentralに送るだけ */
     return ZMK_BEHAVIOR_OPAQUE;
 #else
-    /* Central側、または単体キーボードの場合：1ノッチ分のスクロールを直接発火 */
-    int32_t val = 1;
-    uint16_t code = INPUT_REL_WHEEL; /* デフォルトは縦ホイール */
-
-    switch (data->direction) {
-        case EC_MSC_U:
-            code = INPUT_REL_WHEEL;
-            val = 1;   /* 上 */
-            break;
-        case EC_MSC_D:
-            code = INPUT_REL_WHEEL;
-            val = -1;  /* 下 */
-            break;
-        case EC_MSC_R:
-            code = INPUT_REL_HWHEEL;
-            val = 1;   /* 右 */
-            break;
-        case EC_MSC_L:
-            code = INPUT_REL_HWHEEL;
-            val = -1;  /* 左 */
-            break;
-    }
-
-    /* Zephyrのinputサブシステムに直接イベントを投げ込む */
-    input_report_rel(dev, code, val, true, K_NO_WAIT);
-
-    return ZMK_BEHAVIOR_OPAQUE;
+    /* * 【最大の修正ポイント】
+     * msc は「時間駆動（Tickベース）」のため、0msだと距離0になってしまいます。
+     * ここで `20` を指定し、20msだけ &msc を押しっぱなしにすることで
+     * 確実にPC側へスクロール信号を発生させます。
+     */
+    return zmk_behavior_queue_add(&event, msc_binding, true,  0) ||
+           zmk_behavior_queue_add(&event, msc_binding, false, 20);
 #endif
 }
 
-/* ── Behavior driver API ─────────────────────────────────────────────── */
 static const struct behavior_driver_api behavior_ec_msc_driver_api = {
     .sensor_binding_accept_data = on_sensor_binding_accept_data,
     .sensor_binding_process     = on_sensor_binding_process,
 };
 
-/* ── Instantiation macro ─────────────────────────────────────────────── */
 #define EC_MSC_INST(n)                                                           \
     static struct behavior_ec_msc_data behavior_ec_msc_data_##n = {};           \
     static const struct behavior_ec_msc_config behavior_ec_msc_config_##n = {}; \
