@@ -11,9 +11,13 @@
 #include <zephyr/sys/atomic.h>
 
 #include <zmk/behavior.h>
+
+// 中央（Central）側、または非スリット環境のビルドでのみ必要なヘッダーをインクルード
+#if !defined(CONFIG_ZMK_SPLIT) || defined(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
 #include <zmk/hid.h>
 #include <zmk/endpoints.h>
 #include <dt-bindings/zmk/pointing.h>
+#endif
 
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
@@ -36,8 +40,11 @@ static int behavior_ec_ms_accept_data(struct zmk_behavior_binding *binding,
     }
     struct behavior_ec_ms_data *data = dev->data;
 
+    // 回転データの格納はCentral側でのみ意味を持つため条件分岐
+#if !defined(CONFIG_ZMK_SPLIT) || defined(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
     const struct sensor_value value = channel_data[0].value;
     atomic_set(&data->rotation_value, (atomic_val_t)value.val1);
+#endif
 
     return 0;
 }
@@ -49,15 +56,14 @@ static int behavior_ec_ms_process(struct zmk_behavior_binding *binding,
         return ZMK_BEHAVIOR_TRANSPARENT;
     }
 
+    // HID送信関数が存在する「Central側」でのみロジックを展開する
+#if !defined(CONFIG_ZMK_SPLIT) || defined(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
     const struct device *dev = zmk_behavior_get_binding(binding->behavior_dev);
     if (dev == NULL) {
         return -ENODEV;
     }
     struct behavior_ec_ms_data *data = dev->data;
 
-    // CAS (Compare-and-Swap) ループによる、完全なロックフリーのRead-and-Clear
-    // 値を読み出しつつ0へのリセットを試み、成功するまで安全にループします。
-    // これにより、データの取りこぼしや競合が100%発生しなくなります。
     atomic_val_t rotation;
     do {
         rotation = atomic_get(&data->rotation_value);
@@ -66,7 +72,6 @@ static int behavior_ec_ms_process(struct zmk_behavior_binding *binding,
         }
     } while (!atomic_cas(&data->rotation_value, rotation, 0));
 
-    // 退避した物理回転方向に基づき、キーマップで指定されたパラメータ（SCRL_UP等）を確定
     uint32_t param = (rotation > 0) ? binding->param1 : binding->param2;
 
     int16_t h_wheel = 0;
@@ -93,7 +98,6 @@ static int behavior_ec_ms_process(struct zmk_behavior_binding *binding,
 
     LOG_DBG("Encoder One-shot Scroll: param=%d, h_wheel=%d, wheel=%d", param, h_wheel, wheel);
 
-    // 非ブロッキング・ワンショット送信
     zmk_hid_mouse_scroll_set(h_wheel, wheel);
     zmk_endpoint_send_mouse_report();
 
@@ -101,6 +105,10 @@ static int behavior_ec_ms_process(struct zmk_behavior_binding *binding,
     zmk_endpoint_send_mouse_report();
 
     return ZMK_BEHAVIOR_OPAQUE;
+#else
+    // Peripheral側（L側）では何もせず透過させて終了（Central側が後で処理するため問題なし）
+    return ZMK_BEHAVIOR_TRANSPARENT;
+#endif
 }
 
 static const struct behavior_driver_api behavior_encoder_mouse_scroll_driver_api = {
