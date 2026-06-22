@@ -10,6 +10,9 @@
 #include <zephyr/logging/log.h>
 #include <zmk/behavior.h>
 
+#include <zmk/keymap.h>
+#include <zmk/virtual_key_position.h>
+
 #if !defined(CONFIG_ZMK_SPLIT) || defined(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
 #include <zmk/hid.h>
 #include <zmk/endpoints.h>
@@ -19,8 +22,8 @@
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 struct behavior_ec_ms_data {
-    int32_t remainder;
-    int32_t triggers;
+    struct sensor_value remainder[ZMK_KEYMAP_SENSORS_LEN][ZMK_KEYMAP_LAYERS_LEN];
+    int32_t triggers[ZMK_KEYMAP_SENSORS_LEN][ZMK_KEYMAP_LAYERS_LEN];
 };
 
 static int behavior_ec_ms_accept_data(struct zmk_behavior_binding *binding,
@@ -28,7 +31,6 @@ static int behavior_ec_ms_accept_data(struct zmk_behavior_binding *binding,
                                       const struct zmk_sensor_config *sensor_config,
                                       size_t channel_data_size,
                                       const struct zmk_sensor_channel_data *channel_data) {
-/*test debug
     if (channel_data_size == 0 || channel_data == NULL) {
         return -EINVAL;
     }
@@ -38,65 +40,78 @@ static int behavior_ec_ms_accept_data(struct zmk_behavior_binding *binding,
         return -ENODEV;
     }
 
-#if !defined(CONFIG_ZMK_SPLIT) || defined(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
     struct behavior_ec_ms_data *data = dev->data;
     const struct sensor_value value = channel_data[0].value;
 
-    //Add test renainder
-    if ((value.val1 > 0 && data->remainder < 0) ||
-    (value.val1 < 0 && data->remainder > 0)) {
-    data->remainder = 0;
+    int sensor_index = ZMK_SENSOR_POSITION_FROM_VIRTUAL_KEY_POSITION(event.position);
+    struct sensor_value *rem = &data->remainder[sensor_index][event.layer];
+    int32_t *trig = &data->triggers[sensor_index][event.layer];
+
+    if ((value.val1 > 0 && rem->val1 < 0) || (value.val1 < 0 && rem->val1 > 0)) {
+        rem->val1 = 0;
+        rem->val2 = 0;
     }
 
-    data->remainder += value.val1;
+    rem->val1 += value.val1;
+    rem->val2 += value.val2;
+
+    if (abs(rem->val2) >= 1000000) {
+        rem->val1 += rem->val2 / 1000000;
+        rem->val2 %= 1000000;
+    }
+
     int trigger_degrees = 360 / sensor_config->triggers_per_rotation;
-    int triggers = data->remainder / trigger_degrees;
+    int triggers = rem->val1 / trigger_degrees;
 
-    data->remainder %= trigger_degrees;
-    data->triggers = triggers;
+    rem->val1 %= trigger_degrees;
+    *trig = triggers;
 
-    //fordebug
-    LOG_DBG("ec_ms accept: val1=%d, remainder=%d, trigger_degrees=%d, triggers=%d",
-            value.val1, data->remainder, trigger_degrees, triggers);
+    LOG_DBG("ec_ms accept [sensor %d]: val1=%d, val2=%d, remainder=%d, triggers=%d",
+            sensor_index, value.val1, value.val2, rem->val1, triggers);
 
-#endif
-*/
-//test log add
-    LOG_DBG("ec_ms accept_data called, val1=%d", channel_data[0].value.val1);
     return 0;
 }
 
 static int behavior_ec_ms_process(struct zmk_behavior_binding *binding,
                                   struct zmk_behavior_binding_event event,
                                   enum behavior_sensor_binding_process_mode mode) {
-    if (mode != BEHAVIOR_SENSOR_BINDING_PROCESS_MODE_TRIGGER) {
-        return ZMK_BEHAVIOR_TRANSPARENT;
-    }
-
-#if !defined(CONFIG_ZMK_SPLIT) || defined(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
     const struct device *dev = zmk_behavior_get_binding(binding->behavior_dev);
     if (dev == NULL) {
         return -ENODEV;
     }
     struct behavior_ec_ms_data *data = dev->data;
+    
+    int sensor_index = ZMK_SENSOR_POSITION_FROM_VIRTUAL_KEY_POSITION(event.position);
+    int32_t triggers = data->triggers[sensor_index][event.layer];
+    
+    /* DISCARD時も正しくゼロクリアされる */
+    data->triggers[sensor_index][event.layer] = 0; 
 
-    int32_t triggers = data->triggers;
-    data->triggers = 0; 
+    if (mode != BEHAVIOR_SENSOR_BINDING_PROCESS_MODE_TRIGGER) {
+        return ZMK_BEHAVIOR_TRANSPARENT;
+    }
 
     if (triggers == 0) {
         return ZMK_BEHAVIOR_TRANSPARENT;
     }
 
-    uint32_t param = binding->param1;//test debug(triggers > 0) ? binding->param1 : binding->param2;
+#if !defined(CONFIG_ZMK_SPLIT) || defined(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
+    uint32_t param = (triggers > 0) ? binding->param1 : binding->param2;
 
     int16_t h_wheel = MOVE_X_DECODE(param);
     int16_t wheel = MOVE_Y_DECODE(param);
+
+    if (h_wheel > 0) h_wheel = 1;
+    else if (h_wheel < 0) h_wheel = -1;
+
+    if (wheel > 0) wheel = 1;
+    else if (wheel < 0) wheel = -1;
 
     int abs_trig = (triggers > 0) ? triggers : -triggers;
     h_wheel *= abs_trig;
     wheel *= abs_trig;
 
-    LOG_DBG("Encoder One-shot Scroll: triggers=%d, h_wheel=%d, wheel=%d", triggers, h_wheel, wheel);
+    LOG_DBG("Encoder Mouse Scroll Sent: h_wheel=%d, wheel=%d", h_wheel, wheel);
 
     zmk_hid_mouse_scroll_set(h_wheel, wheel);
     zmk_endpoint_send_mouse_report();
@@ -115,8 +130,8 @@ static const struct behavior_driver_api behavior_encoder_mouse_scroll_driver_api
     .sensor_binding_process = behavior_ec_ms_process
 };
 
-#define EMS_INST(n)                                                                                \
-    static struct behavior_ec_ms_data behavior_ec_ms_data_##n = { .remainder = 0, .triggers = 0 };  \
+#define EMS_INST(n)                                                                                 \
+    static struct behavior_ec_ms_data behavior_ec_ms_data_##n = {};                                 \
     BEHAVIOR_DT_INST_DEFINE(n, NULL, NULL, &behavior_ec_ms_data_##n, NULL, POST_KERNEL,             \
                             CONFIG_KERNEL_INIT_PRIORITY_DEFAULT,                                    \
                             &behavior_encoder_mouse_scroll_driver_api);
