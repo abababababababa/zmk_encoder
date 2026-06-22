@@ -1,8 +1,8 @@
-name: zmk_encoder
+# Copyright (c) 2026 Your Name
+# SPDX-License-Identifier: MIT
+
 build:
   cmake: .
   kconfig: Kconfig
   settings:
-    board_root: .
     dts_root: .
-    snippet_root: .
