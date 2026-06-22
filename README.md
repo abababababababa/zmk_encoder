@@ -16,5 +16,20 @@ memo
 Add
 #include <dt-bindings/zmk/pointing.h>
 
+//splitの場合
+/ {
+	behaviors {
+        ec_ms_l: ec_ms_h {
+            compatible = "zmk,behavior-encoder-mouse-scroll";
+            #sensor-binding-cells = <2>;
+        };
+        ec_ms_r: ec_ms_v {
+            compatible = "zmk,behavior-encoder-mouse-scroll";
+            #sensor-binding-cells = <2>;
+        };
+    };
+};
+
+
 Add
-sensor-bindings = <&ec_ms SCRL_LEFT SCRL_RIGHT &ec_ms SCRL_DOWN SCRL_UP>;
+sensor-bindings = <&ec_ms_l SCRL_LEFT SCRL_RIGHT &ec_ms_r SCRL_DOWN SCRL_UP>;
