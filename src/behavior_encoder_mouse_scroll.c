@@ -8,11 +8,8 @@
 #include <zephyr/device.h>
 #include <drivers/behavior.h>
 #include <zephyr/logging/log.h>
-#include <zephyr/sys/atomic.h>
-
 #include <zmk/behavior.h>
 
-// 中央（Central）側、または非スリット環境のビルドでのみ必要なヘッダーをインクルード
 #if !defined(CONFIG_ZMK_SPLIT) || defined(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
 #include <zmk/hid.h>
 #include <zmk/endpoints.h>
@@ -22,7 +19,8 @@
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 struct behavior_ec_ms_data {
-    atomic_t rotation_value;
+    int32_t remainder;
+    int32_t triggers;
 };
 
 static int behavior_ec_ms_accept_data(struct zmk_behavior_binding *binding,
@@ -38,12 +36,17 @@ static int behavior_ec_ms_accept_data(struct zmk_behavior_binding *binding,
     if (dev == NULL) {
         return -ENODEV;
     }
-    struct behavior_ec_ms_data *data = dev->data;
 
-    // 回転データの格納はCentral側でのみ意味を持つため条件分岐
 #if !defined(CONFIG_ZMK_SPLIT) || defined(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
+    struct behavior_ec_ms_data *data = dev->data;
     const struct sensor_value value = channel_data[0].value;
-    atomic_set(&data->rotation_value, (atomic_val_t)value.val1);
+
+    data->remainder += value.val1;
+    int trigger_degrees = 360 / sensor_config->triggers_per_rotation;
+    int triggers = data->remainder / trigger_degrees;
+
+    data->remainder %= trigger_degrees;
+    data->triggers = triggers;
 #endif
 
     return 0;
@@ -56,7 +59,6 @@ static int behavior_ec_ms_process(struct zmk_behavior_binding *binding,
         return ZMK_BEHAVIOR_TRANSPARENT;
     }
 
-    // HID送信関数が存在する「Central側」でのみロジックを展開する
 #if !defined(CONFIG_ZMK_SPLIT) || defined(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
     const struct device *dev = zmk_behavior_get_binding(binding->behavior_dev);
     if (dev == NULL) {
@@ -64,39 +66,23 @@ static int behavior_ec_ms_process(struct zmk_behavior_binding *binding,
     }
     struct behavior_ec_ms_data *data = dev->data;
 
-    atomic_val_t rotation;
-    do {
-        rotation = atomic_get(&data->rotation_value);
-        if (rotation == 0) {
-            return ZMK_BEHAVIOR_TRANSPARENT;
-        }
-    } while (!atomic_cas(&data->rotation_value, rotation, 0));
+    int32_t triggers = data->triggers;
+    data->triggers = 0; 
 
-    uint32_t param = (rotation > 0) ? binding->param1 : binding->param2;
-
-    int16_t h_wheel = 0;
-    int16_t wheel = 0;
-    int16_t scroll_amount = 1;
-
-    switch (param) {
-        case SCRL_UP:
-            wheel = scroll_amount;
-            break;
-        case SCRL_DOWN:
-            wheel = -scroll_amount;
-            break;
-        case SCRL_LEFT:
-            h_wheel = -scroll_amount;
-            break;
-        case SCRL_RIGHT:
-            h_wheel = scroll_amount;
-            break;
-        default:
-            LOG_WRN("Invalid scroll parameter: %d", param);
-            return ZMK_BEHAVIOR_OPAQUE;
+    if (triggers == 0) {
+        return ZMK_BEHAVIOR_TRANSPARENT;
     }
 
-    LOG_DBG("Encoder One-shot Scroll: param=%d, h_wheel=%d, wheel=%d", param, h_wheel, wheel);
+    uint32_t param = (triggers > 0) ? binding->param1 : binding->param2;
+
+    int16_t h_wheel = MOVE_X_DECODE(param);
+    int16_t wheel = MOVE_Y_DECODE(param);
+
+    int abs_trig = (triggers > 0) ? triggers : -triggers;
+    h_wheel *= abs_trig;
+    wheel *= abs_trig;
+
+    LOG_DBG("Encoder One-shot Scroll: triggers=%d, h_wheel=%d, wheel=%d", triggers, h_wheel, wheel);
 
     zmk_hid_mouse_scroll_set(h_wheel, wheel);
     zmk_endpoint_send_mouse_report();
@@ -106,7 +92,6 @@ static int behavior_ec_ms_process(struct zmk_behavior_binding *binding,
 
     return ZMK_BEHAVIOR_OPAQUE;
 #else
-    // Peripheral側（L側）では何もせず透過させて終了（Central側が後で処理するため問題なし）
     return ZMK_BEHAVIOR_TRANSPARENT;
 #endif
 }
@@ -117,7 +102,7 @@ static const struct behavior_driver_api behavior_encoder_mouse_scroll_driver_api
 };
 
 #define EMS_INST(n)                                                                                \
-    static struct behavior_ec_ms_data behavior_ec_ms_data_##n = { .rotation_value = ATOMIC_INIT(0) }; \
+    static struct behavior_ec_ms_data behavior_ec_ms_data_##n = { .remainder = 0, .triggers = 0 };  \
     BEHAVIOR_DT_INST_DEFINE(n, NULL, NULL, &behavior_ec_ms_data_##n, NULL, POST_KERNEL,             \
                             CONFIG_KERNEL_INIT_PRIORITY_DEFAULT,                                    \
                             &behavior_encoder_mouse_scroll_driver_api);
