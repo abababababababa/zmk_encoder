@@ -61,6 +61,8 @@ static int behavior_ec_ms_accept_data(struct zmk_behavior_binding *binding,
 
 #endif
 */
+//test log add
+    LOG_DBG("ec_ms accept_data called, val1=%d", channel_data[0].value.val1);
     return 0;
 }
 
