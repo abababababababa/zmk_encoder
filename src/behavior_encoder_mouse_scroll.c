@@ -41,6 +41,12 @@ static int behavior_ec_ms_accept_data(struct zmk_behavior_binding *binding,
     struct behavior_ec_ms_data *data = dev->data;
     const struct sensor_value value = channel_data[0].value;
 
+    //Add test renainder
+    if ((value.val1 > 0 && data->remainder < 0) ||
+    (value.val1 < 0 && data->remainder > 0)) {
+    data->remainder = 0;
+    }
+
     data->remainder += value.val1;
     int trigger_degrees = 360 / sensor_config->triggers_per_rotation;
     int triggers = data->remainder / trigger_degrees;
