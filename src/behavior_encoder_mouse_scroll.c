@@ -47,6 +47,11 @@ static int behavior_ec_ms_accept_data(struct zmk_behavior_binding *binding,
 
     data->remainder %= trigger_degrees;
     data->triggers = triggers;
+
+    //fordebug
+    LOG_DBG("ec_ms accept: val1=%d, remainder=%d, trigger_degrees=%d, triggers=%d",
+            value.val1, data->remainder, trigger_degrees, triggers);
+
 #endif
 
     return 0;
