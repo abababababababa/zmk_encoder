@@ -1,13 +1,5 @@
-# Copyright (c) 2024 ec_msc contributors
+# Copyright (c) 2026 Your Name
 # SPDX-License-Identifier: MIT
-#
-# zephyr/module.yml
-#
-# Declares this repository as a Zephyr / ZMK module so that west and
-# the ZMK build system can discover the CMakeLists.txt, Kconfig, and
-# dts/bindings automatically.
-
-name: zmk-behavior-ec-msc
 
 build:
   cmake: .
