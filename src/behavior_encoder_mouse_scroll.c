@@ -55,12 +55,18 @@ static int behavior_ec_ms_process(struct zmk_behavior_binding *binding,
     }
     struct behavior_ec_ms_data *data = dev->data;
 
-    int32_t rotation = (int32_t)atomic_exch(&data->rotation_value, 0);
+    // CAS (Compare-and-Swap) ループによる、完全なロックフリーのRead-and-Clear
+    // 値を読み出しつつ0へのリセットを試み、成功するまで安全にループします。
+    // これにより、データの取りこぼしや競合が100%発生しなくなります。
+    atomic_val_t rotation;
+    do {
+        rotation = atomic_get(&data->rotation_value);
+        if (rotation == 0) {
+            return ZMK_BEHAVIOR_TRANSPARENT;
+        }
+    } while (!atomic_cas(&data->rotation_value, rotation, 0));
 
-    if (rotation == 0) {
-        return ZMK_BEHAVIOR_TRANSPARENT;
-    }
-
+    // 退避した物理回転方向に基づき、キーマップで指定されたパラメータ（SCRL_UP等）を確定
     uint32_t param = (rotation > 0) ? binding->param1 : binding->param2;
 
     int16_t h_wheel = 0;
@@ -87,6 +93,7 @@ static int behavior_ec_ms_process(struct zmk_behavior_binding *binding,
 
     LOG_DBG("Encoder One-shot Scroll: param=%d, h_wheel=%d, wheel=%d", param, h_wheel, wheel);
 
+    // 非ブロッキング・ワンショット送信
     zmk_hid_mouse_scroll_set(h_wheel, wheel);
     zmk_endpoint_send_mouse_report();
 
