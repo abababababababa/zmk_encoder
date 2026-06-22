@@ -28,6 +28,7 @@ static int behavior_ec_ms_accept_data(struct zmk_behavior_binding *binding,
                                       const struct zmk_sensor_config *sensor_config,
                                       size_t channel_data_size,
                                       const struct zmk_sensor_channel_data *channel_data) {
+/*test debug
     if (channel_data_size == 0 || channel_data == NULL) {
         return -EINVAL;
     }
@@ -59,7 +60,7 @@ static int behavior_ec_ms_accept_data(struct zmk_behavior_binding *binding,
             value.val1, data->remainder, trigger_degrees, triggers);
 
 #endif
-
+*/
     return 0;
 }
 
@@ -84,7 +85,7 @@ static int behavior_ec_ms_process(struct zmk_behavior_binding *binding,
         return ZMK_BEHAVIOR_TRANSPARENT;
     }
 
-    uint32_t param = (triggers > 0) ? binding->param1 : binding->param2;
+    uint32_t param = binding->param1;//test debug(triggers > 0) ? binding->param1 : binding->param2;
 
     int16_t h_wheel = MOVE_X_DECODE(param);
     int16_t wheel = MOVE_Y_DECODE(param);
