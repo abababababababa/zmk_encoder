@@ -1,24 +1,58 @@
-# ZMK Module Template
+# ZMK Module: エンコーダでマウスホイールを動かす
 
-This repository contains a template for a ZMK module, as it would most frequently be used. 
+ロータリーエンコーダをマウスホイールとして使えるようにするZMKモジュールです。  
+ZMK v0.4で動作確認しています。
 
-## Usage
+## 概要
 
-Read through the [ZMK Module Creation](https://zmk.dev/docs/development/module-creation) page for details on how to configure this template.
+通常、ZMKではエンコーダの挙動を `sensor-bindings` にて `&inc_dec_kp` として設定しますが、
+これではホイールスクロールを割り当てることができません。このモジュールはその問題を解決します。
 
-## More Info
+また、エンコーダの処理を press → release の2イベントではなく、
+**set → 送信 → クリア → 再送信** までを1回のプロセスで完結させているため、
+処理が重なってキューが溢れても release の処理を漏らすことがありません。
 
-For more info on modules, you can read through  through the [Zephyr modules page](https://docs.zephyrproject.org/3.5.0/develop/modules.html) and [ZMK's page on using modules](https://zmk.dev/docs/features/modules). [Zephyr's west manifest page](https://docs.zephyrproject.org/3.5.0/develop/west/manifest.html#west-manifests) may also be of use.
+---
 
-memo
+## 導入方法
 
-.keymap
-Add
+### 1. west.yml の編集
+
+> [!WARNING]
+> YMLファイルはインデント（スペースの数）を間違えるだけでエラーになります。慎重に編集してください。
+
+`remotes` セクションに追記：
+
+```yaml
+- name: abababababababa
+  url-base: https://github.com/abababababababa
+```
+
+`projects` セクションに追記：
+
+```yaml
+- name: zmk_encoder
+  remote: abababababababa
+  revision: main
+  path: modules/zmk_encoder
+```
+
+---
+
+### 2. keymap ファイルの編集
+
+ファイルの先頭でインクルードを追加：
+
+```c
 #include <dt-bindings/zmk/pointing.h>
+```
 
-//splitの場合
+ビヘイビアを定義します。エンコーダが2個ある場合の例です。
+1個だけの場合は片方のみ記述してください。
+
+```dts
 / {
-	behaviors {
+    behaviors {
         ec_ms_l: ec_ms_h {
             compatible = "zmk,behavior-encoder-mouse-scroll";
             #sensor-binding-cells = <2>;
@@ -29,7 +63,18 @@ Add
         };
     };
 };
+```
 
+レイヤー内でエンコーダの動作を割り当てます：
 
-Add
+```dts
 sensor-bindings = <&ec_ms_l SCRL_LEFT SCRL_RIGHT &ec_ms_r SCRL_DOWN SCRL_UP>;
+```
+
+| バインディング | 時計回り | 反時計回り |
+|---|---|---|
+| `&ec_ms_l` | `SCRL_LEFT` | `SCRL_RIGHT` |
+| `&ec_ms_r` | `SCRL_DOWN` | `SCRL_UP` |
+
+使用できる方向は `SCRL_UP` `SCRL_DOWN` `SCRL_LEFT` `SCRL_RIGHT` の4種類です。
+時計回りと反時計回りに異なる方向を組み合わせることもできます。
